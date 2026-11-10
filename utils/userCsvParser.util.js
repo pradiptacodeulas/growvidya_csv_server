@@ -83,15 +83,8 @@ function parseUserCsvBuffer(buffer) {
       branch_id: raw.branch_id || raw.branch || null,
       first_name: raw.first_name || null,
       last_name: raw.last_name || null,
-      email: raw.email || raw.email_address || null,
-      phone:
-        raw.phone ||
-        raw.phone_number ||
-        raw.primary_contact_number ||
-        raw.mobile ||
-        raw.mobile_number ||
-        raw.contact_number ||
-        null,
+      email: raw.email || null,
+      phone: raw.phone || null,
       password: raw.password || null,
       gender: raw.gender || null,
       blood_group: raw.blood_group || null,

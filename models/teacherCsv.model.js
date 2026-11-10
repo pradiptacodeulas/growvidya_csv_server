@@ -392,7 +392,34 @@ class TeacherCsvModel {
       const bloodGroupId = await this.resolveMasterValue(connection, 'blood_group_master', 'blood_group', row.blood_group);
       const maritalId = await this.resolveMasterValue(connection, 'marital_master', 'marital_status', row.marital_status);
 
-      const rawPassword = row.password || row.primary_contact_number || null;
+      const trimmedEmail =
+        row.email_address && String(row.email_address).trim() ? String(row.email_address).trim() : null;
+      const trimmedPhone =
+        row.primary_contact_number && String(row.primary_contact_number).trim()
+          ? String(row.primary_contact_number).trim()
+          : null;
+
+      if (trimmedEmail) {
+        const [emailRows] = await connection.query(
+          'SELECT id FROM teacher_master WHERE school_id = ? AND status != 4 AND LOWER(TRIM(email_address)) = LOWER(TRIM(?)) LIMIT 1',
+          [schoolId, trimmedEmail]
+        );
+        if (emailRows.length > 0) {
+          throw new Error(`Email address "${trimmedEmail}" already exists in the system.`);
+        }
+      }
+
+      if (trimmedPhone) {
+        const [phoneRows] = await connection.query(
+          'SELECT id FROM teacher_master WHERE school_id = ? AND status != 4 AND LOWER(TRIM(primary_contact_number)) = LOWER(TRIM(?)) LIMIT 1',
+          [schoolId, trimmedPhone]
+        );
+        if (phoneRows.length > 0) {
+          throw new Error(`Primary contact number "${trimmedPhone}" already exists in the system.`);
+        }
+      }
+
+      const rawPassword = row.password || trimmedPhone || null;
       const hashedPassword = rawPassword ? await bcrypt.hash(String(rawPassword), 10) : null;
 
       const teacherStatus =
@@ -425,8 +452,8 @@ class TeacherCsvModel {
           sectionId || null,
           subjectId || null,
           genderId,
-          row.primary_contact_number || null,
-          row.email_address || null,
+          trimmedPhone,
+          trimmedEmail,
           bloodGroupId || null,
           row.date_of_joining || null,
           row.father_name || null,
