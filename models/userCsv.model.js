@@ -221,26 +221,31 @@ class UserCsvModel {
   }
 
   /**
-   * Resolve branch ID for the school from branch_master.
+   * Resolve branch ID for the school from branch_master dynamically.
    */
   static async resolveBranchId(schoolId, branchId = null, connection = pool) {
     const hasMultipleBranches = await organizationHasMultipleBranches(schoolId, connection);
-    if (hasMultipleBranches && branchId && branchId !== 'all' && branchId !== '0') {
-      if (!isNaN(Number(branchId)) && Number(branchId) > 0) {
-        const [idRows] = await connection.query(
-          'SELECT id FROM branch_master WHERE id = ? AND school_id = ? AND status != 4 LIMIT 1',
-          [Number(branchId), schoolId]
-        );
-        if (idRows.length > 0) return Number(idRows[0].id);
-      } else {
-        const cleanBranch = String(branchId).trim().toLowerCase();
-        const [bRows] = await connection.query(
-          'SELECT id FROM branch_master WHERE school_id = ? AND status != 4 AND (LOWER(TRIM(branch_name)) = ? OR LOWER(TRIM(branch_code)) = ?) LIMIT 1',
-          [schoolId, cleanBranch, cleanBranch]
-        );
-        if (bRows.length > 0) return Number(bRows[0].id);
+
+    if (hasMultipleBranches && branchId !== null && branchId !== undefined && String(branchId).trim() !== '') {
+      const cleanBranch = String(branchId).trim();
+      const isNumeric = /^\d+$/.test(cleanBranch);
+
+      const [bRows] = await connection.query(
+        `SELECT id FROM branch_master
+         WHERE school_id = ? AND status != 4
+           AND (${isNumeric ? 'id = ? OR ' : ''}LOWER(TRIM(branch_name)) = ? OR LOWER(TRIM(branch_code)) = ?)
+         LIMIT 1`,
+        isNumeric
+          ? [schoolId, Number(cleanBranch), cleanBranch.toLowerCase(), cleanBranch.toLowerCase()]
+          : [schoolId, cleanBranch.toLowerCase(), cleanBranch.toLowerCase()]
+      );
+
+      if (bRows.length === 0) {
+        throw new Error(`Branch "${branchId}" does not exist for this school.`);
       }
+      return Number(bRows[0].id);
     }
+
     const [rows] = await connection.query(
       'SELECT id FROM branch_master WHERE school_id = ? AND status != 4 ORDER BY is_main_branch DESC, id ASC LIMIT 1',
       [schoolId]
@@ -249,26 +254,27 @@ class UserCsvModel {
   }
 
   /**
-   * Resolve master table lookup values when either an ID or a display name is provided.
+   * Resolve master table lookup values dynamically from the database by ID or display name.
    */
   static async resolveMasterValue(connection, table, nameColumn, value, schoolId = null, idColumn = 'id') {
     if (value === undefined || value === null || String(value).trim() === '') return null;
     const trimmed = String(value).trim();
-    if (/^\d+$/.test(trimmed)) return Number(trimmed);
+    const lowerTrimmed = trimmed.toLowerCase();
+    const isNumeric = /^\d+$/.test(trimmed);
 
-    try {
-      let sql = `SELECT \`${idColumn}\` AS id FROM \`${table}\` WHERE LOWER(TRIM(\`${nameColumn}\`)) = ?`;
-      const params = [trimmed.toLowerCase()];
-      if (schoolId !== null) {
-        sql += ` AND (school_id = ? OR school_id IS NULL)`;
-        params.push(schoolId);
-      }
-      sql += ` LIMIT 1`;
-      const [rows] = await connection.query(sql, params);
-      if (rows && rows.length > 0) return rows[0].id;
-    } catch (_) {}
+    let sql = `SELECT \`${idColumn}\` AS id FROM \`${table}\` WHERE (${
+      isNumeric ? `\`${idColumn}\` = ? OR ` : ''
+    }LOWER(TRIM(\`${nameColumn}\`)) = ?)`;
+    const params = isNumeric ? [Number(trimmed), lowerTrimmed] : [lowerTrimmed];
 
-    return trimmed;
+    if (schoolId !== null) {
+      sql += ` AND (school_id = ? OR school_id IS NULL)`;
+      params.push(schoolId);
+    }
+    sql += ` LIMIT 1`;
+
+    const [rows] = await connection.query(sql, params);
+    return rows && rows.length > 0 ? Number(rows[0].id) : null;
   }
 
   /**
@@ -331,36 +337,56 @@ class UserCsvModel {
       const trimmedEmail = row.email && String(row.email).trim() ? String(row.email).trim() : null;
       const trimmedPhone = row.phone && String(row.phone).trim() ? String(row.phone).trim() : null;
 
-      const rawPassword = row.password || trimmedPhone || null;
-      const hashedPassword = rawPassword ? await bcrypt.hash(String(rawPassword), 10) : null;
+      const rawPassword = row.password && String(row.password).trim() ? String(row.password).trim() : null;
+      const hashedPassword = rawPassword ? await bcrypt.hash(rawPassword, 10) : null;
 
-      const userStatus =
-        row.status !== null && row.status !== undefined && !isNaN(row.status) ? Number(row.status) : 1;
-      const adminType = Number(row.admin_type) === 1 ? 1 : 2;
+      const insertCols = [
+        'school_id',
+        'branch_id',
+        'first_name',
+        'last_name',
+        'email',
+        'phone',
+        'password',
+        'blood_group',
+        'country_id',
+        'state_id',
+        'city',
+        'role',
+      ];
+      const insertVals = [
+        schoolId,
+        branchId,
+        row.first_name,
+        row.last_name,
+        trimmedEmail,
+        trimmedPhone,
+        hashedPassword,
+        bloodGroupId,
+        countryId,
+        stateId,
+        cityId,
+        Number(roleId),
+      ];
 
-      // 1. Insert into user_master
+      if (genderId !== null) {
+        insertCols.push('gender');
+        insertVals.push(genderId);
+      }
+      if (row.admin_type !== null && row.admin_type !== undefined && !isNaN(row.admin_type)) {
+        insertCols.push('admin_type');
+        insertVals.push(Number(row.admin_type));
+      }
+      if (row.status !== null && row.status !== undefined && !isNaN(row.status)) {
+        insertCols.push('status');
+        insertVals.push(Number(row.status));
+      }
+
+      // 1. Insert into user_master (relying on database schema defaults for omitted optional columns)
+      const placeholders = insertCols.map(() => '?').join(', ');
       const [userResult] = await connection.query(
-        `INSERT INTO user_master (
-          school_id, branch_id, first_name, last_name, email, phone, password, gender,
-          blood_group, picture, country_id, state_id, city, role, admin_type, status, date
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, NOW())`,
-        [
-          schoolId,
-          branchId,
-          row.first_name || '',
-          row.last_name || '',
-          trimmedEmail,
-          trimmedPhone,
-          hashedPassword,
-          genderId || null,
-          bloodGroupId || null,
-          countryId || null,
-          stateId || null,
-          cityId || null,
-          Number(roleId),
-          adminType,
-          userStatus,
-        ]
+        `INSERT INTO user_master (${insertCols.join(', ')}) VALUES (${placeholders})`,
+        insertVals
       );
 
       const userId = userResult.insertId;
@@ -376,26 +402,26 @@ class UserCsvModel {
       ) {
         await connection.query(
           `INSERT INTO user_bank (
-            school_id, branch_id, user_id, account_name, account_number, bank_name, ifsc_code, branch_name, status, created_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, NOW())`,
+            school_id, branch_id, user_id, account_name, account_number, bank_name, ifsc_code, branch_name
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             schoolId,
             branchId,
             userId,
-            row.account_name || `${row.first_name || ''} ${row.last_name || ''}`.trim(),
-            row.account_number || '',
-            row.bank_name || '',
-            row.ifsc_code || '',
-            row.branch_name || '',
+            row.account_name,
+            row.account_number,
+            row.bank_name,
+            row.ifsc_code,
+            row.branch_name,
           ]
         );
 
         if ((row.bank_name && row.account_number) || row.basic_salary !== null) {
           await connection.query(
             `INSERT INTO beneficiary_master (
-              school_id, branch_id, user_type, employee_id, basic_salary, status
-            ) VALUES (?, ?, 1, ?, ?, 1)`,
-            [schoolId, branchId, userId, Number(row.basic_salary || 0)]
+              school_id, branch_id, user_type, employee_id, basic_salary
+            ) VALUES (?, ?, 1, ?, ?)`,
+            [schoolId, branchId, userId, row.basic_salary]
           );
         }
       }
@@ -419,16 +445,16 @@ class UserCsvModel {
 
         await connection.query(
           `INSERT INTO user_transport (
-            school_id, branch_id, user_id, route, vehicle_number, pickup_point, drop_point, staus, created_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, NOW())`,
+            school_id, branch_id, user_id, route, vehicle_number, pickup_point, drop_point
+          ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
           [
             schoolId,
             branchId,
             userId,
-            routeId || null,
-            vehicleId || null,
-            row.pickup_point || '',
-            row.drop_point || '',
+            routeId,
+            vehicleId,
+            row.pickup_point,
+            row.drop_point,
           ]
         );
       }
@@ -452,9 +478,9 @@ class UserCsvModel {
 
         await connection.query(
           `INSERT INTO user_hostel (
-            school_id, branch_id, user_id, hostel_name, room_number, status, created_at
-          ) VALUES (?, ?, ?, ?, ?, 1, NOW())`,
-          [schoolId, branchId, userId, hostelId || null, roomId || null]
+            school_id, branch_id, user_id, hostel_name, room_number
+          ) VALUES (?, ?, ?, ?, ?)`,
+          [schoolId, branchId, userId, hostelId, roomId]
         );
       }
 
