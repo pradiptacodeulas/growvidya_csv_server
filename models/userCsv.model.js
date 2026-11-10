@@ -6,6 +6,35 @@ const { organizationHasMultipleBranches } = require('../utils/branchScope.util')
 const failedUserBatchesById = new Map();
 const latestFailedUserBatchBySchool = new Map();
 
+function normalizeEmail(email) {
+  if (email === undefined || email === null) return '';
+  return String(email).trim().toLowerCase();
+}
+
+function getPhoneKeys(phone) {
+  if (phone === undefined || phone === null) return [];
+  const raw = String(phone).trim().toLowerCase();
+  if (!raw) return [];
+
+  const keys = new Set([raw]);
+  const digits = raw.replace(/\D/g, '');
+  if (digits) {
+    keys.add(digits);
+    const noLeadingZeros = digits.replace(/^0+/, '');
+    if (noLeadingZeros) {
+      keys.add(noLeadingZeros);
+      keys.add(`0${noLeadingZeros}`);
+    }
+    if (digits.length >= 10) {
+      const last10 = digits.slice(-10);
+      keys.add(last10);
+      keys.add(`0${last10}`);
+    }
+  }
+
+  return Array.from(keys);
+}
+
 class UserCsvModel {
   /**
    * Dynamically fetch User Model column headers directly from the live MySQL database schema:
@@ -278,35 +307,103 @@ class UserCsvModel {
   }
 
   /**
-   * Check which email addresses or phone numbers already exist in user_master for the school.
+   * Check which email addresses or phone numbers already exist in user_master.
    */
-  static async checkExistingDuplicates(schoolId, emails = [], phones = []) {
+  static async checkExistingDuplicates(schoolId, emails = [], phones = [], connection = pool) {
     const duplicateEmails = new Set();
     const duplicatePhones = new Set();
 
-    if (emails.length > 0) {
-      const placeholders = emails.map(() => '?').join(', ');
-      const [rows] = await pool.query(
-        `SELECT email FROM user_master WHERE school_id = ? AND status != 4 AND LOWER(TRIM(email)) IN (${placeholders})`,
-        [schoolId, ...emails.map((v) => String(v).trim().toLowerCase())]
+    const cleanEmails = Array.from(
+      new Set(emails.map((v) => normalizeEmail(v)).filter(Boolean))
+    );
+
+    if (cleanEmails.length > 0) {
+      const placeholders = cleanEmails.map(() => '?').join(', ');
+      const [rows] = await connection.query(
+        `SELECT email FROM user_master
+         WHERE (status != 4 OR status IS NULL)
+           AND email IS NOT NULL
+           AND TRIM(email) != ''
+           AND LOWER(TRIM(email)) IN (${placeholders})`,
+        cleanEmails
       );
       rows.forEach((r) => {
-        if (r.email) duplicateEmails.add(String(r.email).trim().toLowerCase());
+        const normalized = normalizeEmail(r.email);
+        if (normalized) duplicateEmails.add(normalized);
       });
     }
 
-    if (phones.length > 0) {
-      const placeholders = phones.map(() => '?').join(', ');
-      const [rows] = await pool.query(
-        `SELECT phone FROM user_master WHERE school_id = ? AND status != 4 AND LOWER(TRIM(phone)) IN (${placeholders})`,
-        [schoolId, ...phones.map((v) => String(v).trim().toLowerCase())]
-      );
+    const allPhoneKeys = new Set();
+    const last10Keys = new Set();
+    for (const p of phones) {
+      const keys = getPhoneKeys(p);
+      keys.forEach((k) => allPhoneKeys.add(k));
+      const digits = String(p || '').replace(/\D/g, '');
+      if (digits.length >= 10) {
+        last10Keys.add(digits.slice(-10));
+      } else if (digits) {
+        last10Keys.add(digits);
+      }
+    }
+
+    const phoneKeyArray = Array.from(allPhoneKeys);
+    const last10Array = Array.from(last10Keys);
+
+    if (phoneKeyArray.length > 0) {
+      const keyPlaceholders = phoneKeyArray.map(() => '?').join(', ');
+      const cleanedCol =
+        "REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(TRIM(phone), ' ', ''), '-', ''), '+', ''), '(', ''), ')', '')";
+
+      let sql = `
+        SELECT phone FROM user_master
+        WHERE (status != 4 OR status IS NULL)
+          AND phone IS NOT NULL
+          AND TRIM(phone) != ''
+          AND (
+            LOWER(TRIM(phone)) IN (${keyPlaceholders})
+            OR ${cleanedCol} IN (${keyPlaceholders})
+      `;
+      const params = [...phoneKeyArray, ...phoneKeyArray];
+
+      if (last10Array.length > 0) {
+        const last10Placeholders = last10Array.map(() => '?').join(', ');
+        sql += ` OR RIGHT(${cleanedCol}, 10) IN (${last10Placeholders})`;
+        params.push(...last10Array);
+      }
+
+      sql += `)`;
+
+      const [rows] = await connection.query(sql, params);
       rows.forEach((r) => {
-        if (r.phone) duplicatePhones.add(String(r.phone).trim().toLowerCase());
+        if (r.phone) {
+          getPhoneKeys(r.phone).forEach((k) => duplicatePhones.add(k));
+        }
       });
     }
 
     return { duplicateEmails, duplicatePhones };
+  }
+
+  /**
+   * Validate a single record's email and phone against user_master to ensure neither is duplicated.
+   */
+  static async validateDuplicateUserRecord(connection, schoolId, email, phone) {
+    const { duplicateEmails, duplicatePhones } = await this.checkExistingDuplicates(
+      schoolId,
+      email ? [email] : [],
+      phone ? [phone] : [],
+      connection
+    );
+
+    const lowerEmail = normalizeEmail(email);
+    const phoneKeys = getPhoneKeys(phone);
+
+    const isEmailDuplicate = Boolean(lowerEmail && duplicateEmails.has(lowerEmail));
+    const isPhoneDuplicate = Boolean(
+      phoneKeys.length > 0 && phoneKeys.some((k) => duplicatePhones.has(k))
+    );
+
+    return { isEmailDuplicate, isPhoneDuplicate };
   }
 
   /**
@@ -336,6 +433,23 @@ class UserCsvModel {
 
       const trimmedEmail = row.email && String(row.email).trim() ? String(row.email).trim() : null;
       const trimmedPhone = row.phone && String(row.phone).trim() ? String(row.phone).trim() : null;
+
+      const { isEmailDuplicate, isPhoneDuplicate } = await this.validateDuplicateUserRecord(
+        connection,
+        schoolId,
+        trimmedEmail,
+        trimmedPhone
+      );
+      if (isEmailDuplicate || isPhoneDuplicate) {
+        const dupReasons = [];
+        if (isEmailDuplicate) {
+          dupReasons.push(`Email address "${trimmedEmail}" already exists in the system.`);
+        }
+        if (isPhoneDuplicate) {
+          dupReasons.push(`Phone number "${trimmedPhone}" already exists in the system.`);
+        }
+        throw new Error(dupReasons.join(' '));
+      }
 
       const rawPassword = row.password && String(row.password).trim() ? String(row.password).trim() : null;
       const hashedPassword = rawPassword ? await bcrypt.hash(rawPassword, 10) : null;
@@ -515,16 +629,17 @@ class UserCsvModel {
         batchesProcessed += 1;
 
         const batchEmails = batchRows
-          .map((r) => (r.email ? String(r.email).trim().toLowerCase() : ''))
+          .map((r) => normalizeEmail(r.email))
           .filter(Boolean);
         const batchPhones = batchRows
-          .map((r) => (r.phone ? String(r.phone).trim().toLowerCase() : ''))
+          .map((r) => (r.phone ? String(r.phone).trim() : ''))
           .filter(Boolean);
 
         const { duplicateEmails, duplicatePhones } = await this.checkExistingDuplicates(
           schoolId,
           batchEmails,
-          batchPhones
+          batchPhones,
+          connection
         );
 
         for (const row of batchRows) {
@@ -543,7 +658,7 @@ class UserCsvModel {
             reasons.push('Role (role) is required.');
           }
 
-          const lowerEmail = row.email ? String(row.email).trim().toLowerCase() : '';
+          const lowerEmail = normalizeEmail(row.email);
           if (lowerEmail) {
             if (duplicateEmails.has(lowerEmail)) {
               reasons.push(`Email address "${row.email}" already exists in the system.`);
@@ -552,11 +667,11 @@ class UserCsvModel {
             }
           }
 
-          const lowerPhone = row.phone ? String(row.phone).trim().toLowerCase() : '';
-          if (lowerPhone) {
-            if (duplicatePhones.has(lowerPhone)) {
+          const phoneKeys = getPhoneKeys(row.phone);
+          if (phoneKeys.length > 0) {
+            if (phoneKeys.some((k) => duplicatePhones.has(k))) {
               reasons.push(`Phone number "${row.phone}" already exists in the system.`);
-            } else if (seenPhones.has(lowerPhone)) {
+            } else if (phoneKeys.some((k) => seenPhones.has(k))) {
               reasons.push(`Duplicate phone number "${row.phone}" in uploaded file.`);
             }
           }
@@ -583,8 +698,16 @@ class UserCsvModel {
               row
             );
             insertedIds.push(newId);
-            if (lowerEmail) seenEmails.add(lowerEmail);
-            if (lowerPhone) seenPhones.add(lowerPhone);
+            if (lowerEmail) {
+              seenEmails.add(lowerEmail);
+              duplicateEmails.add(lowerEmail);
+            }
+            if (phoneKeys.length > 0) {
+              phoneKeys.forEach((k) => {
+                seenPhones.add(k);
+                duplicatePhones.add(k);
+              });
+            }
           } catch (dbErr) {
             failedRecords.push({
               row_number: row._rowNumber,
