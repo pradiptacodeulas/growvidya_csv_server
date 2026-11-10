@@ -306,11 +306,12 @@ class StudentCsvModel {
   }
 
   /**
-   * Check which admission numbers or email addresses already exist in student_master.
+   * Check which admission numbers, email addresses, or phone numbers already exist in student_master.
    */
-  static async checkExistingDuplicates(schoolId, admissionNumbers = [], emails = []) {
+  static async checkExistingDuplicates(schoolId, admissionNumbers = [], emails = [], phones = []) {
     const duplicateAdmissions = new Set();
     const duplicateEmails = new Set();
+    const duplicatePhones = new Set();
 
     if (admissionNumbers.length > 0) {
       const [admRows] = await pool.query(
@@ -334,9 +335,21 @@ class StudentCsvModel {
       }
     }
 
+    if (phones.length > 0) {
+      const [phoneRows] = await pool.query(
+        `SELECT LOWER(TRIM(primary_contact_number)) AS phone FROM student_master 
+         WHERE school_id = ? AND status != 4 AND LOWER(TRIM(primary_contact_number)) IN (?)`,
+        [schoolId, phones]
+      );
+      for (const r of phoneRows) {
+        if (r.phone) duplicatePhones.add(r.phone);
+      }
+    }
+
     return {
       duplicateAdmissions,
       duplicateEmails,
+      duplicatePhones,
     };
   }
 
@@ -587,13 +600,40 @@ class StudentCsvModel {
       const categoryId = await this.resolveMasterValue(connection, 'student_category_master', 'category', data.category);
       const motherTongueId = await this.resolveMasterValue(connection, 'mother_tongue_master', 'mother_tongue', data.mother_tongue);
 
+      const trimmedEmail =
+        data.email_address && String(data.email_address).trim() ? String(data.email_address).trim() : null;
+      const trimmedPhone =
+        data.primary_contact_number && String(data.primary_contact_number).trim()
+          ? String(data.primary_contact_number).trim()
+          : null;
+
+      if (trimmedEmail) {
+        const [emailRows] = await connection.query(
+          'SELECT id FROM student_master WHERE school_id = ? AND status != 4 AND LOWER(TRIM(email_address)) = LOWER(TRIM(?)) LIMIT 1',
+          [schoolId, trimmedEmail]
+        );
+        if (emailRows.length > 0) {
+          throw new Error(`Email address "${trimmedEmail}" already exists in the system.`);
+        }
+      }
+
+      if (trimmedPhone) {
+        const [phoneRows] = await connection.query(
+          'SELECT id FROM student_master WHERE school_id = ? AND status != 4 AND LOWER(TRIM(primary_contact_number)) = LOWER(TRIM(?)) LIMIT 1',
+          [schoolId, trimmedPhone]
+        );
+        if (phoneRows.length > 0) {
+          throw new Error(`Primary contact number "${trimmedPhone}" already exists in the system.`);
+        }
+      }
+
       let defaultPlainPassword = null;
       if (data.password && String(data.password).trim()) {
         defaultPlainPassword = String(data.password).trim();
       } else if (data.date_of_birth && String(data.date_of_birth).trim()) {
         defaultPlainPassword = String(data.date_of_birth).trim();
-      } else if (data.primary_contact_number && String(data.primary_contact_number).trim()) {
-        defaultPlainPassword = String(data.primary_contact_number).trim();
+      } else if (trimmedPhone) {
+        defaultPlainPassword = trimmedPhone;
       }
       const studentHashedPassword = defaultPlainPassword ? await bcrypt.hash(defaultPlainPassword, 10) : null;
 
@@ -620,8 +660,8 @@ class StudentCsvModel {
         genderId,
         data.date_of_birth,
         studentHashedPassword,
-        data.primary_contact_number,
-        data.email_address,
+        trimmedPhone,
+        trimmedEmail,
         bloodGroupId,
         houseId,
         religionId,
@@ -762,15 +802,20 @@ class StudentCsvModel {
     const allEmails = rows
       .map((r) => (r.email_address ? String(r.email_address).trim().toLowerCase() : ''))
       .filter(Boolean);
+    const allPhones = rows
+      .map((r) => (r.primary_contact_number ? String(r.primary_contact_number).trim().toLowerCase() : ''))
+      .filter(Boolean);
 
-    const { duplicateAdmissions, duplicateEmails } = await this.checkExistingDuplicates(
+    const { duplicateAdmissions, duplicateEmails, duplicatePhones } = await this.checkExistingDuplicates(
       schoolId,
       allAdmissionNumbers,
-      allEmails
+      allEmails,
+      allPhones
     );
 
     const seenAdmissions = new Set();
     const seenEmails = new Set();
+    const seenPhones = new Set();
     const insertedIds = [];
     const failedRecords = [];
 
@@ -805,6 +850,17 @@ class StudentCsvModel {
           }
         }
 
+        const lowerPhone = row.primary_contact_number
+          ? String(row.primary_contact_number).trim().toLowerCase()
+          : '';
+        if (lowerPhone) {
+          if (duplicatePhones.has(lowerPhone)) {
+            reasons.push(`Primary contact number "${row.primary_contact_number}" already exists in the system.`);
+          } else if (seenPhones.has(lowerPhone)) {
+            reasons.push(`Duplicate primary contact number "${row.primary_contact_number}" in uploaded file.`);
+          }
+        }
+
         if (reasons.length > 0) {
           failedRecords.push({
             row_number: row._rowNumber,
@@ -812,6 +868,7 @@ class StudentCsvModel {
             first_name: row.first_name,
             last_name: row.last_name,
             email_address: row.email_address,
+            primary_contact_number: row.primary_contact_number,
             failure_reason: reasons.join(' '),
             student_data: row._flatRow,
           });
@@ -823,6 +880,7 @@ class StudentCsvModel {
           insertedIds.push(newStudentId);
           if (lowerAdm) seenAdmissions.add(lowerAdm);
           if (lowerEmail) seenEmails.add(lowerEmail);
+          if (lowerPhone) seenPhones.add(lowerPhone);
         } catch (dbErr) {
           failedRecords.push({
             row_number: row._rowNumber,
@@ -830,6 +888,7 @@ class StudentCsvModel {
             first_name: row.first_name,
             last_name: row.last_name,
             email_address: row.email_address,
+            primary_contact_number: row.primary_contact_number,
             failure_reason: dbErr.message,
             student_data: row._flatRow,
           });
