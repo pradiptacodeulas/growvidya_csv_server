@@ -70,7 +70,7 @@ class UserCsvController {
    */
   static async uploadUsersCsv(req, res, next) {
     try {
-      const schoolId = req.user?.schoolId || req.user?.school_id;
+      const schoolId = extractSchoolIdFromRequest(req) || req.user?.schoolId || req.user?.school_id;
       const branchId =
         req.body?.branch_id ||
         req.body?.branchId ||
@@ -123,6 +123,15 @@ class UserCsvController {
         batchSize
       );
 
+      const failedRecords = result.failedRecords.map((item) => ({
+        row_number: item.row_number,
+        first_name: item.first_name,
+        last_name: item.last_name,
+        email: item.email,
+        phone: item.phone,
+        failure_reason: item.failure_reason,
+      }));
+
       const summary = {
         total_users: result.totalUsers,
         successfully_uploaded: result.successfullyUploaded,
@@ -139,29 +148,27 @@ class UserCsvController {
         `Successfully Uploaded: ${result.successfullyUploaded} | ` +
         `Remaining / Failed: ${result.remainingFailed}`;
 
-      return ApiResponse.success(
-        res,
-        summaryMessage,
-        {
-          summary,
-          total_users: result.totalUsers,
-          successfully_uploaded: result.successfullyUploaded,
-          remaining_failed: result.remainingFailed,
-          batches_processed: result.batchesProcessed,
-          failed_batch_id: result.failedBatchId,
-          failed_csv_download_url: failedDownloadUrl,
-          failed_records: result.failedRecords.map((item) => ({
-            row_number: item.row_number,
-            first_name: item.first_name,
-            last_name: item.last_name,
-            email: item.email,
-            phone: item.phone,
-            role: item.role,
-            failure_reason: item.failure_reason,
-          })),
-        },
-        result.successfullyUploaded > 0 ? 201 : 200
-      );
+      const responseData = {
+        summary,
+        total_users: result.totalUsers,
+        successfully_uploaded: result.successfullyUploaded,
+        remaining_failed: result.remainingFailed,
+        batches_processed: result.batchesProcessed,
+        failed_batch_id: result.failedBatchId,
+        failed_csv_download_url: failedDownloadUrl,
+        failed_records: failedRecords,
+      };
+
+      if (result.successfullyUploaded === 0) {
+        return res.status(400).json({
+          success: false,
+          message: summaryMessage,
+          data: responseData,
+          errors: failedRecords,
+        });
+      }
+
+      return ApiResponse.success(res, summaryMessage, responseData, 201);
     } catch (error) {
       next(error);
     }

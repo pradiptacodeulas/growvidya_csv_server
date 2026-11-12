@@ -27,6 +27,8 @@ class UserCsvModel {
       'otp_expires_at',
       'verification_code',
       'date',
+      'role',
+      'status',
     ]);
 
     if (!hasMultipleBranches) {
@@ -57,7 +59,12 @@ class UserCsvModel {
 
     // 1. user_master columns
     for (const c of userCols) {
-      if (!excludedUserCols.has(c.Field)) {
+      if (excludedUserCols.has(c.Field)) continue;
+      if (c.Field === 'country_id') {
+        headers.push('country');
+      } else if (c.Field === 'state_id') {
+        headers.push('state');
+      } else {
         headers.push(c.Field);
       }
     }
@@ -228,22 +235,25 @@ class UserCsvModel {
 
     if (hasMultipleBranches && branchId !== null && branchId !== undefined && String(branchId).trim() !== '') {
       const cleanBranch = String(branchId).trim();
-      const isNumeric = /^\d+$/.test(cleanBranch);
+      const lowerBranch = cleanBranch.toLowerCase();
 
-      const [bRows] = await connection.query(
-        `SELECT id FROM branch_master
-         WHERE school_id = ? AND status != 4
-           AND (${isNumeric ? 'id = ? OR ' : ''}LOWER(TRIM(branch_name)) = ? OR LOWER(TRIM(branch_code)) = ?)
-         LIMIT 1`,
-        isNumeric
-          ? [schoolId, Number(cleanBranch), cleanBranch.toLowerCase(), cleanBranch.toLowerCase()]
-          : [schoolId, cleanBranch.toLowerCase(), cleanBranch.toLowerCase()]
-      );
+      if (lowerBranch !== 'all' && lowerBranch !== '0' && lowerBranch !== 'all_branches') {
+        const isNumeric = /^\d+$/.test(cleanBranch);
 
-      if (bRows.length === 0) {
-        throw new Error(`Branch "${branchId}" does not exist for this school.`);
+        const [bRows] = await connection.query(
+          `SELECT id FROM branch_master
+           WHERE school_id = ? AND status != 4
+             AND (${isNumeric ? 'id = ? OR ' : ''}LOWER(TRIM(branch_name)) = ? OR LOWER(TRIM(branch_code)) = ?)
+           LIMIT 1`,
+          isNumeric
+            ? [schoolId, Number(cleanBranch), lowerBranch, lowerBranch]
+            : [schoolId, lowerBranch, lowerBranch]
+        );
+
+        if (bRows.length > 0) {
+          return Number(bRows[0].id);
+        }
       }
-      return Number(bRows[0].id);
     }
 
     const [rows] = await connection.query(
@@ -322,16 +332,10 @@ class UserCsvModel {
 
     try {
       const branchId = await this.resolveBranchId(schoolId, row.branch_id || defaultBranchId, connection);
-      const roleId = await this.resolveMasterValue(connection, 'role_master', 'role_name', row.role, schoolId);
-
-      if (!roleId || isNaN(Number(roleId))) {
-        throw new Error(`Role "${row.role}" does not exist for this school.`);
-      }
-
       const genderId = await this.resolveMasterValue(connection, 'gender_master', 'gender', row.gender);
       const bloodGroupId = await this.resolveMasterValue(connection, 'blood_group_master', 'blood_group', row.blood_group);
-      const countryId = await this.resolveMasterValue(connection, 'countries', 'name', row.country_id);
-      const stateId = await this.resolveMasterValue(connection, 'states', 'state', row.state_id, null, 'id_state');
+      const countryId = await this.resolveMasterValue(connection, 'countries', 'name', row.country || row.country_id);
+      const stateId = await this.resolveMasterValue(connection, 'states', 'state', row.state || row.state_id, null, 'id_state');
       const cityId = await this.resolveMasterValue(connection, 'cities', 'name', row.city);
 
       const trimmedEmail = row.email && String(row.email).trim() ? String(row.email).trim() : null;
@@ -373,6 +377,7 @@ class UserCsvModel {
         'state_id',
         'city',
         'role',
+        'status',
       ];
       const insertVals = [
         schoolId,
@@ -386,7 +391,8 @@ class UserCsvModel {
         countryId,
         stateId,
         cityId,
-        Number(roleId),
+        0,
+        1,
       ];
 
       if (genderId !== null) {
@@ -396,10 +402,6 @@ class UserCsvModel {
       if (row.admin_type !== null && row.admin_type !== undefined && !isNaN(row.admin_type)) {
         insertCols.push('admin_type');
         insertVals.push(Number(row.admin_type));
-      }
-      if (row.status !== null && row.status !== undefined && !isNaN(row.status)) {
-        insertCols.push('status');
-        insertVals.push(Number(row.status));
       }
 
       // 1. Insert into user_master (relying on database schema defaults for omitted optional columns)
@@ -439,8 +441,8 @@ class UserCsvModel {
         if ((row.bank_name && row.account_number) || row.basic_salary !== null) {
           await connection.query(
             `INSERT INTO beneficiary_master (
-              school_id, branch_id, user_type, employee_id, basic_salary
-            ) VALUES (?, ?, 1, ?, ?)`,
+              school_id, branch_id, user_type, employee_id, basic_salary, status
+            ) VALUES (?, ?, 1, ?, ?, 1)`,
             [schoolId, branchId, userId, row.basic_salary]
           );
         }
@@ -559,9 +561,6 @@ class UserCsvModel {
           if (!row.email) {
             reasons.push('Email address (email) is required.');
           }
-          if (!row.role) {
-            reasons.push('Role (role) is required.');
-          }
 
           const lowerEmail = row.email ? String(row.email).trim().toLowerCase() : '';
           if (lowerEmail) {
@@ -588,7 +587,6 @@ class UserCsvModel {
               last_name: row.last_name,
               email: row.email,
               phone: row.phone,
-              role: row.role,
               failure_reason: reasons.join(' '),
               user_data: row._flatRow,
             });
@@ -612,8 +610,7 @@ class UserCsvModel {
               last_name: row.last_name,
               email: row.email,
               phone: row.phone,
-              role: row.role,
-              failure_reason: dbErr.message,
+              failure_reason: dbErr.sqlMessage || dbErr.message,
               user_data: row._flatRow,
             });
           }

@@ -83,17 +83,20 @@ function parseUserCsvBuffer(buffer) {
       branch_id: raw.branch_id || raw.branch || null,
       first_name: raw.first_name || null,
       last_name: raw.last_name || null,
-      email: raw.email || null,
-      phone: raw.phone || null,
+      email: raw.email || raw.email_address || null,
+      phone: raw.phone || raw.phone_number || raw.primary_contact_number || raw.mobile || null,
       password: raw.password || null,
       gender: raw.gender || null,
       blood_group: raw.blood_group || null,
-      country_id: raw.country_id || null,
-      state_id: raw.state_id || null,
+      country: raw.country || raw.country_id || null,
+      state: raw.state || raw.state_id || null,
       city: raw.city || null,
-      role: raw.role || null,
-      admin_type: raw.admin_type !== undefined && raw.admin_type !== '' ? Number(raw.admin_type) : null,
-      status: raw.status !== undefined && raw.status !== '' ? Number(raw.status) : null,
+      role: 0,
+      admin_type:
+        raw.admin_type !== undefined && raw.admin_type !== '' && !isNaN(Number(raw.admin_type))
+          ? Number(raw.admin_type)
+          : null,
+      status: 1,
 
       // 2. user_bank & beneficiary_master fields
       account_name: raw.account_name || null,
@@ -101,7 +104,12 @@ function parseUserCsvBuffer(buffer) {
       bank_name: raw.bank_name || null,
       ifsc_code: raw.ifsc_code || null,
       branch_name: raw.branch_name || null,
-      basic_salary: raw.basic_salary !== undefined && raw.basic_salary !== '' ? Number(raw.basic_salary) : null,
+      basic_salary:
+        raw.basic_salary !== undefined &&
+        raw.basic_salary !== '' &&
+        !isNaN(Number(String(raw.basic_salary).replace(/,/g, '')))
+          ? Number(String(raw.basic_salary).replace(/,/g, ''))
+          : null,
 
       // 3. user_transport fields
       route: raw.route || null,

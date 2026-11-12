@@ -58,7 +58,7 @@ async function startServer() {
     console.error('[DB Connection Error]:', dbCheck.error);
   }
 
-  const port = Number(process.env.PORT);
+  const port = Number(process.env.PORT) || 5175;
   app.listen(port, () => {
     console.log(`GrowVidya Student Upload Server running on http://localhost:${port}`);
   });
