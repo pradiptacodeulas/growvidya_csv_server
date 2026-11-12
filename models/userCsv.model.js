@@ -27,7 +27,7 @@ class UserCsvModel {
       'otp_expires_at',
       'verification_code',
       'date',
-      'role',
+      'admin_type',
       'status',
     ]);
 
@@ -337,6 +337,8 @@ class UserCsvModel {
       const countryId = await this.resolveMasterValue(connection, 'countries', 'name', row.country || row.country_id);
       const stateId = await this.resolveMasterValue(connection, 'states', 'state', row.state || row.state_id, null, 'id_state');
       const cityId = await this.resolveMasterValue(connection, 'cities', 'name', row.city);
+      const resolvedRoleId = await this.resolveMasterValue(connection, 'role_master', 'role_name', row.role, schoolId);
+      const roleId = resolvedRoleId !== null ? resolvedRoleId : 0;
 
       const trimmedEmail = row.email && String(row.email).trim() ? String(row.email).trim() : null;
       const trimmedPhone = row.phone && String(row.phone).trim() ? String(row.phone).trim() : null;
@@ -391,7 +393,7 @@ class UserCsvModel {
         countryId,
         stateId,
         cityId,
-        0,
+        roleId,
         1,
       ];
 

@@ -91,7 +91,7 @@ function parseUserCsvBuffer(buffer) {
       country: raw.country || raw.country_id || null,
       state: raw.state || raw.state_id || null,
       city: raw.city || null,
-      role: 0,
+      role: raw.role || null,
       admin_type:
         raw.admin_type !== undefined && raw.admin_type !== '' && !isNaN(Number(raw.admin_type))
           ? Number(raw.admin_type)
