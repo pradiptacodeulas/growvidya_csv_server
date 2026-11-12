@@ -60,7 +60,9 @@ class UserCsvModel {
     // 1. user_master columns
     for (const c of userCols) {
       if (excludedUserCols.has(c.Field)) continue;
-      if (c.Field === 'country_id') {
+      if (c.Field === 'branch_id') {
+        headers.push('branch_name');
+      } else if (c.Field === 'country_id') {
         headers.push('country');
       } else if (c.Field === 'state_id') {
         headers.push('state');
@@ -97,7 +99,7 @@ class UserCsvModel {
       }
     }
 
-    return Array.from(new Set(headers));
+    return headers;
   }
 
   /**

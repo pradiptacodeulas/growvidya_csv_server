@@ -55,6 +55,7 @@ function parseUserCsvBuffer(buffer) {
     .filter((h) => h && h !== 'failure_reason');
 
   const rawHeaders = rawMatrix[0].map(normalizeHeader);
+  const firstNameIdx = rawHeaders.indexOf('first_name');
   const mappedRows = [];
 
   for (let i = 1; i < rawMatrix.length; i++) {
@@ -64,9 +65,22 @@ function parseUserCsvBuffer(buffer) {
     }
 
     const raw = {};
+    let schoolBranchFromHeader = '';
+    let bankBranchFromHeader = '';
+
     rawHeaders.forEach((header, idx) => {
       if (header && header !== 'failure_reason') {
-        raw[header] = formatCellValue(rowCells[idx]);
+        const val = formatCellValue(rowCells[idx]);
+        if (header === 'branch_name') {
+          if (firstNameIdx !== -1 && idx < firstNameIdx) {
+            schoolBranchFromHeader = val;
+          } else if (firstNameIdx === -1 && idx === 0) {
+            schoolBranchFromHeader = val;
+          } else {
+            bankBranchFromHeader = val;
+          }
+        }
+        raw[header] = val;
       }
     });
 
@@ -77,10 +91,13 @@ function parseUserCsvBuffer(buffer) {
     mappedRows.push({
       _rowNumber: i + 1,
       _headers: headers,
-      _flatRow: raw,
+      _flatRow: {
+        ...raw,
+        ...(schoolBranchFromHeader ? { branch_name: schoolBranchFromHeader } : {}),
+      },
 
       // 1. user_master fields
-      branch_id: raw.branch_id || raw.branch || null,
+      branch_id: raw.branch_id || raw.branch || schoolBranchFromHeader || null,
       first_name: raw.first_name || null,
       last_name: raw.last_name || null,
       email: raw.email || raw.email_address || null,
@@ -103,7 +120,7 @@ function parseUserCsvBuffer(buffer) {
       account_number: raw.account_number || null,
       bank_name: raw.bank_name || null,
       ifsc_code: raw.ifsc_code || null,
-      branch_name: raw.branch_name || null,
+      branch_name: bankBranchFromHeader || (schoolBranchFromHeader ? null : raw.branch_name) || null,
       basic_salary:
         raw.basic_salary !== undefined &&
         raw.basic_salary !== '' &&
