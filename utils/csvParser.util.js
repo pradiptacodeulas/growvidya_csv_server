@@ -110,7 +110,7 @@ function parseExcelBuffer(buffer) {
       _rowNumber: i + 1,
       _headers: headers,
       _flatRow: raw,
-      branch_id: raw.branch_id || raw.branch || null,
+      branch_id: raw.branch_name || raw.branch_id || raw.branch || null,
       academic_year: raw.academic_year || raw.academic_year_id || null,
       admission_number: raw.admission_number || raw.admission_no || null,
       admission_date: formatDateValue(raw.admission_date),
@@ -131,7 +131,7 @@ function parseExcelBuffer(buffer) {
       caste: raw.caste || null,
       mother_tongue: raw.mother_tongue || raw.mother_tongue_id || null,
       language_known: raw.language_known || null,
-      status: raw.status !== undefined && raw.status !== '' ? Number(raw.status) : null,
+      status: 1,
 
       father_info: {
         father_first_name: raw.father_first_name || null,
@@ -254,7 +254,12 @@ function generateFailedRecordsCsvBuffer(failedRecords = [], dynamicHeaders = [])
 
   for (const item of failedRecords) {
     const flat = item.student_data || {};
-    const rowCells = baseHeaders.map((col) => escapeCsvCell(flat[col] ?? ''));
+    const rowCells = baseHeaders.map((col) => {
+      if (col === 'branch_name') {
+        return escapeCsvCell(flat.branch_name ?? flat.branch_id ?? flat.branch ?? '');
+      }
+      return escapeCsvCell(flat[col] ?? '');
+    });
     rowCells.push(escapeCsvCell(item.failure_reason || ''));
     lines.push(rowCells.join(','));
   }
