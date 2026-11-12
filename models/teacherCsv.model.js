@@ -37,6 +37,8 @@ class TeacherCsvModel {
       'state',
       'city',
       'postal_code',
+      'status',
+      'take_attendance',
       'created_on',
       'updated_on',
       'passcode',
@@ -75,7 +77,10 @@ class TeacherCsvModel {
 
     // 1. teacher_master columns
     for (const c of teacherCols) {
-      if (!excludedTeacherCols.has(c.Field)) {
+      if (excludedTeacherCols.has(c.Field)) continue;
+      if (c.Field === 'branch_id') {
+        headers.push('branch_name');
+      } else {
         headers.push(c.Field);
       }
     }
@@ -127,7 +132,7 @@ class TeacherCsvModel {
       }
     }
 
-    return Array.from(new Set(headers));
+    return headers;
   }
 
   /**
@@ -258,31 +263,57 @@ class TeacherCsvModel {
   }
 
   /**
-   * Resolve branch ID for the school from branch_master.
+   * Resolve and validate branch ID for the school from branch_master:
+   * - Single-branch organization:
+   *   - If branch name is provided in CSV/Excel, validate it against the existing branch record.
+   *   - If not provided, automatically assign the school's default/single branch.
+   * - Multiple-branch organization:
+   *   - Branch name must be provided in CSV/Excel and match an existing active branch record.
+   *   - Never assigns a random or default branch if missing or invalid.
    */
-  static async resolveBranchId(schoolId, branchId = null, connection = pool) {
+  static async resolveBranchId(schoolId, branchValue = null, connection = pool) {
     const hasMultipleBranches = await organizationHasMultipleBranches(schoolId, connection);
-    if (hasMultipleBranches && branchId && branchId !== 'all' && branchId !== '0') {
-      if (!isNaN(Number(branchId)) && Number(branchId) > 0) {
-        const [idRows] = await connection.query(
-          'SELECT id FROM branch_master WHERE id = ? AND school_id = ? AND status != 4 LIMIT 1',
-          [Number(branchId), schoolId]
-        );
-        if (idRows.length > 0) return Number(idRows[0].id);
-      } else {
-        const cleanBranch = String(branchId).trim().toLowerCase();
-        const [bRows] = await connection.query(
-          'SELECT id FROM branch_master WHERE school_id = ? AND status != 4 AND (LOWER(TRIM(branch_name)) = ? OR LOWER(TRIM(branch_code)) = ?) LIMIT 1',
-          [schoolId, cleanBranch, cleanBranch]
-        );
-        if (bRows.length > 0) return Number(bRows[0].id);
-      }
+    const cleanBranch =
+      branchValue !== null && branchValue !== undefined ? String(branchValue).trim() : '';
+
+    if (hasMultipleBranches && !cleanBranch) {
+      throw new Error('Branch name (branch_name) is required.');
     }
+
+    if (cleanBranch) {
+      const lowerBranch = cleanBranch.toLowerCase();
+      const isNumeric = /^\d+$/.test(cleanBranch);
+
+      const [bRows] = await connection.query(
+        `SELECT id FROM branch_master
+         WHERE school_id = ? AND status != 4
+           AND (
+             ${isNumeric ? 'id = ? OR ' : ''}
+             LOWER(TRIM(branch_name)) = ?
+             OR LOWER(TRIM(REPLACE(branch_name, '(Main Campus)', ''))) = ?
+             OR LOWER(TRIM(branch_code)) = ?
+           )
+         LIMIT 1`,
+        isNumeric
+          ? [schoolId, Number(cleanBranch), lowerBranch, lowerBranch, lowerBranch]
+          : [schoolId, lowerBranch, lowerBranch, lowerBranch]
+      );
+
+      if (bRows.length === 0) {
+        throw new Error(`Branch "${cleanBranch}" does not exist for this school.`);
+      }
+
+      return Number(bRows[0].id);
+    }
+
     const [rows] = await connection.query(
       'SELECT id FROM branch_master WHERE school_id = ? AND status != 4 ORDER BY is_main_branch DESC, id ASC LIMIT 1',
       [schoolId]
     );
-    return rows.length > 0 ? Number(rows[0].id) : null;
+    if (rows.length === 0) {
+      throw new Error('No active branch found for this school.');
+    }
+    return Number(rows[0].id);
   }
 
   /**
@@ -305,21 +336,24 @@ class TeacherCsvModel {
   static async resolveMasterValue(connection, table, nameColumn, value, schoolId = null, idColumn = 'id') {
     if (value === undefined || value === null || String(value).trim() === '') return null;
     const trimmed = String(value).trim();
-    if (/^\d+$/.test(trimmed)) return Number(trimmed);
+    const lowerTrimmed = trimmed.toLowerCase();
+    const isNumeric = /^\d+$/.test(trimmed);
 
     try {
-      let sql = `SELECT \`${idColumn}\` AS id FROM \`${table}\` WHERE LOWER(TRIM(\`${nameColumn}\`)) = ?`;
-      const params = [trimmed.toLowerCase()];
+      let sql = `SELECT \`${idColumn}\` AS id FROM \`${table}\` WHERE (${
+        isNumeric ? `\`${idColumn}\` = ? OR ` : ''
+      }LOWER(TRIM(\`${nameColumn}\`)) = ?)`;
+      const params = isNumeric ? [Number(trimmed), lowerTrimmed] : [lowerTrimmed];
       if (schoolId !== null) {
         sql += ` AND (school_id = ? OR school_id IS NULL)`;
         params.push(schoolId);
       }
       sql += ` LIMIT 1`;
       const [rows] = await connection.query(sql, params);
-      if (rows && rows.length > 0) return rows[0].id;
-    } catch (_) {}
-
-    return trimmed;
+      return rows && rows.length > 0 ? Number(rows[0].id) : null;
+    } catch (_) {
+      return null;
+    }
   }
 
   /**
@@ -382,7 +416,10 @@ class TeacherCsvModel {
     await connection.beginTransaction();
 
     try {
-      const branchId = await this.resolveBranchId(schoolId, row.branch_id || defaultBranchId, connection);
+      const branchId =
+        row._resolvedBranchId !== undefined
+          ? row._resolvedBranchId
+          : await this.resolveBranchId(schoolId, row.branch_id, connection);
       const academicYearId = await this.resolveAcademicYearId(connection, schoolId, branchId, row.academic_year);
 
       const classId = await this.resolveMasterValue(connection, 'class_master', 'class_name', row.class, schoolId);
@@ -422,12 +459,8 @@ class TeacherCsvModel {
       const rawPassword = row.password || trimmedPhone || null;
       const hashedPassword = rawPassword ? await bcrypt.hash(String(rawPassword), 10) : null;
 
-      const teacherStatus =
-        row.status !== null && row.status !== undefined && !isNaN(row.status) ? Number(row.status) : 1;
-      const takeAttendance =
-        row.take_attendance !== null && row.take_attendance !== undefined && !isNaN(row.take_attendance)
-          ? Number(row.take_attendance)
-          : 2;
+      const teacherStatus = 1;
+      const takeAttendance = 2;
 
       const teacherCode =
         row.teacher_id || `TCH${Math.floor(100000 + Math.random() * 900000)}`;
@@ -747,6 +780,13 @@ class TeacherCsvModel {
 
         for (const row of batchRows) {
           const reasons = [];
+          let resolvedBranchId = null;
+
+          try {
+            resolvedBranchId = await this.resolveBranchId(schoolId, row.branch_id, connection);
+          } catch (branchErr) {
+            reasons.push(branchErr.message);
+          }
 
           if (!row.first_name) {
             reasons.push('First name (first_name) is required.');
@@ -802,6 +842,7 @@ class TeacherCsvModel {
           }
 
           try {
+            row._resolvedBranchId = resolvedBranchId;
             const newId = await this.insertSingleTeacher(
               connection,
               schoolId,

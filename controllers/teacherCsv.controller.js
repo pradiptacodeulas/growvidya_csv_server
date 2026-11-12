@@ -70,7 +70,7 @@ class TeacherCsvController {
    */
   static async uploadTeachersCsv(req, res, next) {
     try {
-      const schoolId = req.user?.schoolId || req.user?.school_id;
+      const schoolId = extractSchoolIdFromRequest(req) || req.user?.schoolId || req.user?.school_id;
       const branchId =
         req.body?.branch_id ||
         req.body?.branchId ||
