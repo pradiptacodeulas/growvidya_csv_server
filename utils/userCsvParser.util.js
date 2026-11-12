@@ -56,6 +56,7 @@ function parseUserCsvBuffer(buffer) {
 
   const rawHeaders = rawMatrix[0].map(normalizeHeader);
   const firstNameIdx = rawHeaders.indexOf('first_name');
+  const ifscIdx = rawHeaders.indexOf('ifsc_code');
   const mappedRows = [];
 
   for (let i = 1; i < rawMatrix.length; i++) {
@@ -72,9 +73,11 @@ function parseUserCsvBuffer(buffer) {
       if (header && header !== 'failure_reason') {
         const val = formatCellValue(rowCells[idx]);
         if (header === 'branch_name') {
-          if (firstNameIdx !== -1 && idx < firstNameIdx) {
-            schoolBranchFromHeader = val;
-          } else if (firstNameIdx === -1 && idx === 0) {
+          if (
+            (firstNameIdx !== -1 && idx < firstNameIdx) ||
+            (ifscIdx !== -1 && idx < ifscIdx) ||
+            (ifscIdx === -1 && idx === 0)
+          ) {
             schoolBranchFromHeader = val;
           } else {
             bankBranchFromHeader = val;
@@ -93,7 +96,8 @@ function parseUserCsvBuffer(buffer) {
       _headers: headers,
       _flatRow: {
         ...raw,
-        ...(schoolBranchFromHeader ? { branch_name: schoolBranchFromHeader } : {}),
+        _school_branch_name: schoolBranchFromHeader || raw.branch_id || raw.branch || '',
+        _bank_branch_name: bankBranchFromHeader || '',
       },
 
       // 1. user_master fields
@@ -175,9 +179,21 @@ function generateFailedUsersCsvBuffer(failedRecords = [], dynamicHeaders = []) {
   const headers = [...baseHeaders, 'failure_reason'];
   const lines = [headers.map(escapeCsvCell).join(',')];
 
+  const firstNameIdx = baseHeaders.indexOf('first_name');
+
   for (const item of failedRecords) {
     const flat = item.user_data || {};
-    const rowCells = baseHeaders.map((col) => escapeCsvCell(flat[col] ?? ''));
+    const rowCells = baseHeaders.map((col, idx) => {
+      if (col === 'branch_name') {
+        const isSchoolBranchCol =
+          (firstNameIdx !== -1 && idx < firstNameIdx) || (firstNameIdx === -1 && idx === 0);
+        if (isSchoolBranchCol) {
+          return escapeCsvCell(flat._school_branch_name ?? flat.branch_id ?? flat.branch ?? '');
+        }
+        return escapeCsvCell(flat._bank_branch_name ?? flat.branch_name ?? '');
+      }
+      return escapeCsvCell(flat[col] ?? '');
+    });
     rowCells.push(escapeCsvCell(item.failure_reason || ''));
     lines.push(rowCells.join(','));
   }

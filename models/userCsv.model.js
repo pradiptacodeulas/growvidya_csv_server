@@ -230,39 +230,57 @@ class UserCsvModel {
   }
 
   /**
-   * Resolve branch ID for the school from branch_master dynamically.
+   * Resolve and validate branch ID for the school from branch_master:
+   * - Single-branch organization:
+   *   - If branch name is provided in CSV/Excel, validate it against the existing branch record.
+   *   - If not provided, automatically assign the school's default/single branch.
+   * - Multiple-branch organization:
+   *   - Branch name must be provided in CSV/Excel and match an existing active branch record.
+   *   - Never assigns a random or default branch if missing or invalid.
    */
-  static async resolveBranchId(schoolId, branchId = null, connection = pool) {
+  static async resolveBranchId(schoolId, branchValue = null, connection = pool) {
     const hasMultipleBranches = await organizationHasMultipleBranches(schoolId, connection);
+    const cleanBranch =
+      branchValue !== null && branchValue !== undefined ? String(branchValue).trim() : '';
 
-    if (hasMultipleBranches && branchId !== null && branchId !== undefined && String(branchId).trim() !== '') {
-      const cleanBranch = String(branchId).trim();
+    if (hasMultipleBranches && !cleanBranch) {
+      throw new Error('Branch name (branch_name) is required.');
+    }
+
+    if (cleanBranch) {
       const lowerBranch = cleanBranch.toLowerCase();
+      const isNumeric = /^\d+$/.test(cleanBranch);
 
-      if (lowerBranch !== 'all' && lowerBranch !== '0' && lowerBranch !== 'all_branches') {
-        const isNumeric = /^\d+$/.test(cleanBranch);
+      const [bRows] = await connection.query(
+        `SELECT id FROM branch_master
+         WHERE school_id = ? AND status != 4
+           AND (
+             ${isNumeric ? 'id = ? OR ' : ''}
+             LOWER(TRIM(branch_name)) = ?
+             OR LOWER(TRIM(REPLACE(branch_name, '(Main Campus)', ''))) = ?
+             OR LOWER(TRIM(branch_code)) = ?
+           )
+         LIMIT 1`,
+        isNumeric
+          ? [schoolId, Number(cleanBranch), lowerBranch, lowerBranch, lowerBranch]
+          : [schoolId, lowerBranch, lowerBranch, lowerBranch]
+      );
 
-        const [bRows] = await connection.query(
-          `SELECT id FROM branch_master
-           WHERE school_id = ? AND status != 4
-             AND (${isNumeric ? 'id = ? OR ' : ''}LOWER(TRIM(branch_name)) = ? OR LOWER(TRIM(branch_code)) = ?)
-           LIMIT 1`,
-          isNumeric
-            ? [schoolId, Number(cleanBranch), lowerBranch, lowerBranch]
-            : [schoolId, lowerBranch, lowerBranch]
-        );
-
-        if (bRows.length > 0) {
-          return Number(bRows[0].id);
-        }
+      if (bRows.length === 0) {
+        throw new Error(`Branch "${cleanBranch}" does not exist for this school.`);
       }
+
+      return Number(bRows[0].id);
     }
 
     const [rows] = await connection.query(
       'SELECT id FROM branch_master WHERE school_id = ? AND status != 4 ORDER BY is_main_branch DESC, id ASC LIMIT 1',
       [schoolId]
     );
-    return rows.length > 0 ? Number(rows[0].id) : null;
+    if (rows.length === 0) {
+      throw new Error('No active branch found for this school.');
+    }
+    return Number(rows[0].id);
   }
 
   /**
@@ -333,7 +351,10 @@ class UserCsvModel {
     await connection.beginTransaction();
 
     try {
-      const branchId = await this.resolveBranchId(schoolId, row.branch_id || defaultBranchId, connection);
+      const branchId =
+        row._resolvedBranchId !== undefined
+          ? row._resolvedBranchId
+          : await this.resolveBranchId(schoolId, row.branch_id, connection);
       const genderId = await this.resolveMasterValue(connection, 'gender_master', 'gender', row.gender);
       const bloodGroupId = await this.resolveMasterValue(connection, 'blood_group_master', 'blood_group', row.blood_group);
       const countryId = await this.resolveMasterValue(connection, 'countries', 'name', row.country || row.country_id);
@@ -555,6 +576,13 @@ class UserCsvModel {
 
         for (const row of batchRows) {
           const reasons = [];
+          let resolvedBranchId = null;
+
+          try {
+            resolvedBranchId = await this.resolveBranchId(schoolId, row.branch_id, connection);
+          } catch (branchErr) {
+            reasons.push(branchErr.message);
+          }
 
           if (!row.first_name) {
             reasons.push('First name (first_name) is required.');
@@ -598,6 +626,7 @@ class UserCsvModel {
           }
 
           try {
+            row._resolvedBranchId = resolvedBranchId;
             const newId = await this.insertSingleUser(
               connection,
               schoolId,

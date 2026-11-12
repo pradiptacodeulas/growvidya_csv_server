@@ -159,16 +159,12 @@ class UserCsvController {
         failed_records: failedRecords,
       };
 
-      if (result.successfullyUploaded === 0) {
-        return res.status(400).json({
-          success: false,
-          message: summaryMessage,
-          data: responseData,
-          errors: failedRecords,
-        });
-      }
-
-      return ApiResponse.success(res, summaryMessage, responseData, 201);
+      return ApiResponse.success(
+        res,
+        summaryMessage,
+        responseData,
+        result.successfullyUploaded > 0 ? 201 : 200
+      );
     } catch (error) {
       next(error);
     }
