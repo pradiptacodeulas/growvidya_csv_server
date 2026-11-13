@@ -75,6 +75,9 @@ class TeacherCsvController {
         req.body?.branch_id ||
         req.body?.branchId ||
         req.query?.branch_id ||
+        req.query?.branchId ||
+        req.headers?.['x-branch-id'] ||
+        req.headers?.['x-branch'] ||
         req.user?.branch_id ||
         req.user?.branchId ||
         null;

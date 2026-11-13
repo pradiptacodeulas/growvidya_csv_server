@@ -317,12 +317,34 @@ class TeacherCsvModel {
   }
 
   /**
-   * Resolve current academic year ID if not provided.
+   * Resolve academic year ID from academic_year_master by value/ID, or active current academic year if not provided.
    */
   static async resolveAcademicYearId(connection, schoolId, branchId, academicYearVal) {
-    if (academicYearVal && /^\d+$/.test(String(academicYearVal).trim())) {
-      return Number(academicYearVal);
+    if (academicYearVal !== undefined && academicYearVal !== null && String(academicYearVal).trim() !== '') {
+      const trimmed = String(academicYearVal).trim();
+      const lowerTrimmed = trimmed.toLowerCase();
+      const noSpaceLower = lowerTrimmed.replace(/\s+/g, '');
+      const isNumeric = /^\d+$/.test(trimmed);
+
+      const [matchedRows] = await connection.query(
+        `SELECT id FROM academic_year_master
+         WHERE school_id = ? AND status = 1
+           AND (
+             LOWER(TRIM(academic_year)) = ?
+             OR REPLACE(LOWER(TRIM(academic_year)), ' ', '') = ?
+             ${isNumeric ? 'OR id = ?' : ''}
+           )
+         ORDER BY CASE WHEN branch_id = ? THEN 0 WHEN branch_id IS NULL THEN 1 ELSE 2 END, is_current DESC, id DESC
+         LIMIT 1`,
+        isNumeric
+          ? [schoolId, lowerTrimmed, noSpaceLower, Number(trimmed), branchId]
+          : [schoolId, lowerTrimmed, noSpaceLower, branchId]
+      );
+      if (matchedRows.length > 0) {
+        return Number(matchedRows[0].id);
+      }
     }
+
     const [rows] = await connection.query(
       'SELECT id FROM academic_year_master WHERE school_id = ? AND status = 1 AND (branch_id = ? OR branch_id IS NULL) ORDER BY is_current DESC, id DESC LIMIT 1',
       [schoolId, branchId]
@@ -333,7 +355,16 @@ class TeacherCsvModel {
   /**
    * Resolve master table lookup values when either an ID or a display name is provided.
    */
-  static async resolveMasterValue(connection, table, nameColumn, value, schoolId = null, idColumn = 'id') {
+  static async resolveMasterValue(
+    connection,
+    table,
+    nameColumn,
+    value,
+    schoolId = null,
+    idColumn = 'id',
+    branchId = null,
+    extraFilter = null
+  ) {
     if (value === undefined || value === null || String(value).trim() === '') return null;
     const trimmed = String(value).trim();
     const lowerTrimmed = trimmed.toLowerCase();
@@ -347,6 +378,18 @@ class TeacherCsvModel {
       if (schoolId !== null) {
         sql += ` AND (school_id = ? OR school_id IS NULL)`;
         params.push(schoolId);
+      }
+      const orderClauses = [];
+      if (branchId !== null && branchId !== undefined) {
+        orderClauses.push(`CASE WHEN branch_id = ? THEN 0 WHEN branch_id IS NULL THEN 1 ELSE 2 END`);
+        params.push(branchId);
+      }
+      if (extraFilter && extraFilter.column && extraFilter.value !== null && extraFilter.value !== undefined) {
+        orderClauses.push(`CASE WHEN \`${extraFilter.column}\` = ? THEN 0 ELSE 1 END`);
+        params.push(extraFilter.value);
+      }
+      if (orderClauses.length > 0) {
+        sql += ` ORDER BY ${orderClauses.join(', ')}`;
       }
       sql += ` LIMIT 1`;
       const [rows] = await connection.query(sql, params);
@@ -422,10 +465,36 @@ class TeacherCsvModel {
           : await this.resolveBranchId(schoolId, row.branch_id, connection);
       const academicYearId = await this.resolveAcademicYearId(connection, schoolId, branchId, row.academic_year);
 
-      const classId = await this.resolveMasterValue(connection, 'class_master', 'class_name', row.class, schoolId);
-      const sectionId = await this.resolveMasterValue(connection, 'section_master', 'section_name', row.section, schoolId);
-      const subjectId = await this.resolveMasterValue(connection, 'subject_master', 'subject_name', row.subject, schoolId);
-      const genderId = (await this.resolveMasterValue(connection, 'gender_master', 'gender', row.gender)) || 1;
+      const classId = await this.resolveMasterValue(
+        connection,
+        'class_master',
+        'class_name',
+        row.class,
+        schoolId,
+        'id',
+        branchId
+      );
+      const sectionId = await this.resolveMasterValue(
+        connection,
+        'section_master',
+        'section_name',
+        row.section,
+        schoolId,
+        'id',
+        branchId,
+        classId ? { column: 'class_id', value: classId } : null
+      );
+      const subjectId = await this.resolveMasterValue(
+        connection,
+        'subject_master',
+        'subject_name',
+        row.subject,
+        schoolId,
+        'id',
+        branchId,
+        classId ? { column: 'class_id', value: classId } : null
+      );
+      const genderId = await this.resolveMasterValue(connection, 'gender_master', 'gender', row.gender);
       const bloodGroupId = await this.resolveMasterValue(connection, 'blood_group_master', 'blood_group', row.blood_group);
       const maritalId = await this.resolveMasterValue(connection, 'marital_master', 'marital_status', row.marital_status);
 
@@ -594,7 +663,9 @@ class TeacherCsvModel {
           'shift_master',
           'shift_name',
           payroll.work_shift,
-          schoolId
+          schoolId,
+          'id',
+          branchId
         );
 
         await connection.query(
@@ -654,15 +725,38 @@ class TeacherCsvModel {
           'trans_route_master',
           'transport_route',
           transport.route,
-          schoolId
+          schoolId,
+          'id',
+          branchId
         );
-        const vehicleId = await this.resolveMasterValue(
-          connection,
-          'trans_vehicle_master',
-          'vehicle_number',
-          transport.vehicle_number,
-          schoolId
-        );
+        const vehicleId =
+          (await this.resolveMasterValue(
+            connection,
+            'trans_vehicle_master',
+            'vehicle_number',
+            transport.vehicle_number,
+            schoolId,
+            'id',
+            branchId
+          )) ||
+          (await this.resolveMasterValue(
+            connection,
+            'bus_master',
+            'number_plate',
+            transport.vehicle_number,
+            schoolId,
+            'id',
+            branchId
+          )) ||
+          (await this.resolveMasterValue(
+            connection,
+            'bus_master',
+            'name',
+            transport.vehicle_number,
+            schoolId,
+            'id',
+            branchId
+          ));
 
         await connection.query(
           `INSERT INTO teacher_transport (
@@ -689,14 +783,19 @@ class TeacherCsvModel {
           'hostel_name_master',
           'hostel_name',
           hostel.hostel_name,
-          schoolId
+          schoolId,
+          'id',
+          branchId
         );
         const roomId = await this.resolveMasterValue(
           connection,
           'hostel_room_master',
           'room_number',
           hostel.room_number,
-          schoolId
+          schoolId,
+          'id',
+          branchId,
+          hostelId ? { column: 'hostel_id', value: hostelId } : null
         );
 
         await connection.query(
@@ -861,7 +960,7 @@ class TeacherCsvModel {
               last_name: row.last_name,
               email_address: row.email_address,
               primary_contact_number: row.primary_contact_number,
-              failure_reason: dbErr.message,
+              failure_reason: dbErr.sqlMessage || dbErr.message,
               teacher_data: row._flatRow,
             });
           }

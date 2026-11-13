@@ -23,6 +23,19 @@ function formatCellValue(val) {
 function formatDateValue(val) {
   const str = formatCellValue(val);
   if (!str) return null;
+  if (/^\d+(\.\d+)?$/.test(str)) {
+    const serial = parseFloat(str);
+    if (serial > 1000 && serial < 100000) {
+      const utcDays = Math.floor(serial - 25569);
+      const dt = new Date(utcDays * 86400 * 1000);
+      if (!isNaN(dt.getTime())) {
+        const year = dt.getUTCFullYear();
+        const month = String(dt.getUTCMonth() + 1).padStart(2, '0');
+        const day = String(dt.getUTCDate()).padStart(2, '0');
+        return `${year}-${month}-${day}`;
+      }
+    }
+  }
   const dmy = str.match(/^(\d{1,2})[\-/](\d{1,2})[\-/](\d{4})$/);
   if (dmy) {
     return `${dmy[3]}-${dmy[2].padStart(2, '0')}-${dmy[1].padStart(2, '0')}`;
